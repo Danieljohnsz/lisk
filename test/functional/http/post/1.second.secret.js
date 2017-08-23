@@ -6,6 +6,9 @@ var constants = require('../../../../helpers/constants');
 
 var sendTransaction = require('../../../common/complexTransactions').sendTransaction;
 var creditAccount = require('../../../common/complexTransactions').creditAccount;
+var sendSignature = require('../../../common/complexTransactions').sendSignature;
+
+var sendSignaturePromisify = node.Promise.promisify(sendSignature);
 
 describe('POST /api/transactions (type 1) register second secret', function () {
 
@@ -13,6 +16,7 @@ describe('POST /api/transactions (type 1) register second secret', function () {
 	var goodTransactions = [];
 	var badTransactionsEnforcement = [];
 	var goodTransactionsEnforcement = [];
+	var pendingMultisignatures = [];
 
 	var account = node.randomAccount();
 	var accountEmptySecondPassword = node.randomAccount();
@@ -20,7 +24,7 @@ describe('POST /api/transactions (type 1) register second secret', function () {
 	var accountNoFunds = node.randomAccount();
 	var accountScarceFunds = node.randomAccount();
 
-	var transaction;
+	var transaction, signature;
 
 	// Crediting accounts
 	before(function (done) {
@@ -258,10 +262,85 @@ describe('POST /api/transactions (type 1) register second secret', function () {
 				}, true);
 			});
 		});
+
+		describe('type 4 - registering multisignature account', function () {
+
+			it('using no second passphrase should fail', function (done) {
+				transaction = node.lisk.multisignature.createMultisignature(account.password, null, ['+' + node.eAccount.publicKey, '+' + accountNoFunds.publicKey, '+' + accountScarceFunds.publicKey], 1, 2);
+
+				sendTransaction(transaction, function (err, res) {
+					node.expect(res).to.have.property('success').to.be.not.ok;
+					node.expect(res).to.have.property('message').to.equal('Missing sender second signature');
+					badTransactionsEnforcement.push(transaction);
+					done();
+				}, true);
+			});
+
+			it('using invalid second passphrase should fail', function (done) {
+				transaction = node.lisk.multisignature.createMultisignature(account.password, 'wrong second password', ['+' + node.eAccount.publicKey, '+' + accountNoFunds.publicKey, '+' + accountScarceFunds.publicKey], 1, 2);
+
+				sendTransaction(transaction, function (err, res) {
+					node.expect(res).to.have.property('success').to.be.not.ok;
+					node.expect(res).to.have.property('message').to.equal('Failed to verify second signature');
+					badTransactionsEnforcement.push(transaction);
+					done();
+				}, true);
+			});
+
+			it('using correct second passphrase should be ok', function (done) {
+				transaction = node.lisk.multisignature.createMultisignature(account.password, account.secondPassword, ['+' + node.eAccount.publicKey, '+' + accountNoFunds.publicKey, '+' + accountScarceFunds.publicKey], 1, 2);
+
+				sendTransaction(transaction, function (err, res) {
+					node.expect(res).to.have.property('success').to.be.ok;
+					node.expect(res).to.have.property('transactionId').to.equal(transaction.id);
+					pendingMultisignatures.push(transaction);
+					done();
+				}, true);
+			});
+
+			it('using correct empty second passphrase should be ok', function (done) {
+				transaction = node.lisk.multisignature.createMultisignature(accountEmptySecondPassword.password, accountEmptySecondPassword.secondPassword, ['+' + node.eAccount.publicKey, '+' + accountNoFunds.publicKey], 1, 2);
+
+				sendTransaction(transaction, function (err, res) {
+					node.expect(res).to.have.property('success').to.be.ok;
+					node.expect(res).to.have.property('transactionId').to.equal(transaction.id);
+					pendingMultisignatures.push(transaction);
+					done();
+				}, true);
+			});
+
+			describe('signing transactions', function () {
+
+				it('with not all the signatures should be ok but never confirmed', function () {
+					signature = node.lisk.multisignature.signTransaction(pendingMultisignatures[0], accountNoFunds.password);
+
+					return sendSignaturePromisify(signature, pendingMultisignatures[0]).then(function (res) {
+						node.expect(res).to.have.property('success').to.be.ok;
+					});
+				});
+
+				it('with all the signatures should be ok and confirmed (even with accounts without funds)', function () {
+					signature = node.lisk.multisignature.signTransaction(pendingMultisignatures[1], accountNoFunds.password);
+
+					return sendSignaturePromisify(signature, pendingMultisignatures[1]).then(function (res) {
+						node.expect(res).to.have.property('success').to.be.ok;
+
+						signature = node.lisk.multisignature.signTransaction(pendingMultisignatures[1], node.eAccount.password);
+
+						return sendSignaturePromisify(signature, pendingMultisignatures[1]).then(function (res) {
+							node.expect(res).to.have.property('success').to.be.ok;
+
+							goodTransactionsEnforcement.push(pendingMultisignatures[1]);
+							pendingMultisignatures.pop();
+						});
+					});
+				});
+			});
+		});
 	});
 
 	describe('enforcement confirmation', function () {
 
-		shared.confirmationPhase(goodTransactionsEnforcement, badTransactionsEnforcement);
+		shared.confirmationPhase(goodTransactionsEnforcement, badTransactionsEnforcement, pendingMultisignatures);
 	});
 });
